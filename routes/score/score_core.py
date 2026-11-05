@@ -5,43 +5,191 @@ from . import score_bp
 from socket_instance import socketio
 from flask_cors import cross_origin
 
+# def update_successor_match(successor_match_id, current_match_id, winning_team_id):
+    # """Updates the successor match with the winning team"""
+    # try:
+    #     successor_match = Match.query.get(successor_match_id)
+    #     if not successor_match:
+    #         return
+        
+    #     # Determine which predecessor this match is and update corresponding team
+    #     if successor_match.predecessor_1 == current_match_id:
+    #         successor_match.team1_id = winning_team_id
+    #     elif successor_match.predecessor_2 == current_match_id:
+    #         successor_match.team2_id = winning_team_id
+            
+    #     # If both teams are set, create score entries
+    #     if successor_match.team1_id and successor_match.team2_id:
+    #         scores = [
+    #             Score(
+    #                 match_id=str(successor_match.id),
+    #                 team_id=successor_match.team1_id,
+    #                 score=0,
+    #                 tournament_id=successor_match.tournament_id
+    #             ),
+    #             Score(
+    #                 match_id=str(successor_match.id),
+    #                 team_id=successor_match.team2_id,
+    #                 score=0,
+    #                 tournament_id=successor_match.tournament_id
+    #             )
+    #         ]
+    #         db.session.bulk_save_objects(scores)
+            
+    #     db.session.commit()
+        
+    # except Exception as e:
+    #     db.session.rollback()
+    #     raise e 
+
+
 def update_successor_match(successor_match_id, current_match_id, winning_team_id):
-    """Updates the successor match with the winning team"""
-    try:
-        successor_match = Match.query.get(successor_match_id)
-        if not successor_match:
-            return
-        
-        # Determine which predecessor this match is and update corresponding team
-        if successor_match.predecessor_1 == current_match_id:
-            successor_match.team1_id = winning_team_id
-        elif successor_match.predecessor_2 == current_match_id:
-            successor_match.team2_id = winning_team_id
-            
-        # If both teams are set, create score entries
-        if successor_match.team1_id and successor_match.team2_id:
-            scores = [
-                Score(
-                    match_id=str(successor_match.id),
-                    team_id=successor_match.team1_id,
-                    score=0,
-                    tournament_id=successor_match.tournament_id
-                ),
-                Score(
-                    match_id=str(successor_match.id),
-                    team_id=successor_match.team2_id,
-                    score=0,
-                    tournament_id=successor_match.tournament_id
+    """Move the winning team into the next knockout match."""
+
+    successor_match = Match.query.get(successor_match_id)
+
+    if not successor_match:
+        raise ValueError("Successor match not found")
+
+    if successor_match.predecessor_1 == current_match_id:
+        successor_match.team1_id = winning_team_id
+
+    elif successor_match.predecessor_2 == current_match_id:
+        successor_match.team2_id = winning_team_id
+
+    else:
+        raise ValueError("Invalid predecessor relationship")
+
+    # Create scores only when both teams are available.
+    if successor_match.team1_id and successor_match.team2_id:
+        for team_id in [successor_match.team1_id, successor_match.team2_id]:
+
+            existing_score = Score.query.filter_by(
+                match_id=successor_match.id,
+                team_id=team_id,
+                tournament_id=successor_match.tournament_id
+            ).first()
+
+            if not existing_score:
+                db.session.add(
+                    Score(
+                        match_id=successor_match.id,
+                        team_id=team_id,
+                        score=0,
+                        tournament_id=successor_match.tournament_id
+                    )
                 )
-            ]
-            db.session.bulk_save_objects(scores)
-            
+
+
+@score_bp.route('/walkover', methods=['POST'])
+def declare_walkover():
+
+    data = request.get_json(silent=True) or {}
+
+    match_id = data.get('match_id')
+    tournament_id = data.get('tournament_id')
+    winner_team_id = data.get('winner_team_id')
+
+    # 1. Validate required fields
+    if not all([match_id, tournament_id, winner_team_id]):
+        return jsonify({
+            'error': 'match_id, tournament_id and winner_team_id are required'
+        }), 400
+
+    try:
+        # 2. Find match belonging to the tournament
+        match = Match.query.filter_by(
+            id=match_id,
+            tournament_id=tournament_id
+        ).with_for_update().first()
+
+        if not match:
+            return jsonify({'error': 'Match not found'}), 404
+
+        # 3. Check match completion
+        if match.is_final or match.status == 'completed':
+            return jsonify({
+                'error': 'Match is already completed'
+            }), 400
+
+        # 4. Validate both teams
+        if not match.team1_id or not match.team2_id:
+            return jsonify({
+                'error': 'Both teams must be assigned before declaring a walkover'
+            }), 400
+
+        if match.team1_id == 'TBD' or match.team2_id == 'TBD':
+            return jsonify({
+                'error': 'Match teams are not ready'
+            }), 400
+
+        if winner_team_id not in [match.team1_id, match.team2_id]:
+            return jsonify({
+                'error': 'Winner must be one of the teams in this match'
+            }), 400
+
+        # 5. Validate winning team belongs to tournament
+        winning_team = Team.query.filter_by(
+            team_id=winner_team_id,
+            tournament_id=tournament_id
+        ).first()
+
+        if not winning_team:
+            return jsonify({
+                'error': 'Winning team not found in tournament'
+            }), 404
+
+        # 6. Record walkover result
+        match.outcome = 'walkover'
+        match.winner_team_id = winner_team_id
+        match.status = 'completed'
+        match.is_final = True
+
+        # 7. Move winner to next knockout match
+        if match.successor:
+            update_successor_match(
+                match.successor,
+                match.id,
+                winner_team_id
+            )
+
+        # 8. Commit everything together
         db.session.commit()
-        
+
+        response = {
+            'message': 'Walkover declared successfully',
+            'match_id': match.id,
+            'tournament_id': match.tournament_id,
+            'outcome': match.outcome,
+            'status': match.status,
+            'winner_team_id': match.winner_team_id,
+            'successor_match_id': match.successor
+        }
+
+        # 9. Notify connected clients
+        socketio.emit(
+            'score_update',
+            response,
+            namespace='/scores'
+        )
+
+        return jsonify(response), 200
+
+    except ValueError as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 400
+
     except Exception as e:
         db.session.rollback()
-        raise e 
+        import traceback
+        traceback.print_exc()
 
+        return jsonify({
+            'error': 'Failed to declare walkover',
+            'details': str(e)
+        }), 500
+
+                    
 @score_bp.route('/update-score', methods=['POST'])
 def update_score():
     print("\n=== Starting update_score endpoint ===")

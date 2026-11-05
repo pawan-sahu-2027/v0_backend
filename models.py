@@ -13,6 +13,8 @@ class SkillType(str, Enum):
     ADVANCED = 'advanced'
     PROFESSIONAL = 'professional'
 
+    
+
 class SuperTournament(db.Model):
     __tablename__ = 'super_tournament'
     
@@ -91,11 +93,14 @@ class Match(db.Model):
     court_number = db.Column(db.Integer)
     court_order = db.Column(db.Integer)
     status = db.Column(db.String(20), default='pending')
+    outcome = db.Column(db.String(20),nullable=False,default='played')
     predecessor_1 = db.Column(db.Integer, db.ForeignKey('match.id'), nullable=True)
     predecessor_2 = db.Column(db.Integer, db.ForeignKey('match.id'), nullable=True)
     successor = db.Column(db.Integer, db.ForeignKey('match.id'), nullable=True)
     bracket_position = db.Column(db.Integer, nullable=True)
     round_number = db.Column(db.Integer, nullable=True)
+    result_type = db.Column( db.String(20), nullable=False, default='normal')  
+    
 
 class Score(db.Model):
     id = db.Column(db.Integer, primary_key=True)

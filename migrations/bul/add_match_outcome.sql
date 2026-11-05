@@ -1,0 +1,2 @@
+ALTER TABLE `match`
+ADD COLUMN outcome VARCHAR(20) NOT NULL DEFAULT 'played';
